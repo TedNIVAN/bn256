@@ -10,8 +10,8 @@ extern const char *bn_pstr;
 extern const char *bn_nstr;
 extern const char *bn_sqrt_neg3_str;
 extern const char *bn_j_str;
-extern const curvepoint_fp_t bn_curvegen;
-extern const twistpoint_fp2_t bn_twistgen;
+extern const g1_t bn_curvegen;
+extern const g2_t bn_twistgen;
 extern const char *b0;
 extern const char *b1;
 extern const scalar_t pMinus3Div4;
@@ -32,12 +32,12 @@ static mpz_t mpz_j;
 
 static bool initialised = 0;
 
-static void fpe_cube(fpe_t rop, fpe_t op);
+static void __unusedfpe_cube(fpe_t rop, fpe_t op);
 static void mpz2scalar(scalar_t rop, mpz_ptr op);
 static void fpe_get_weierstrass(fpe_t y, const fpe_t x);
 static void mpz_fpe_get_weierstrass(mpz_ptr y, mpz_ptr x);
 static void fp2e_get_weierstrass(fp2e_t y, const fp2e_t x);
-static void mpz_2_fpe_hash(fpe_t out, size_t msg_len, const uint8_t msg[msg_len]);
+static void bn256_mpz_hash_fpe(mpz_t hash_out, size_t msg_len, const uint8_t *msg);
 
 static void fpe_cube(fpe_t rop, fpe_t op) {
     fpe_t tmp;
@@ -87,24 +87,24 @@ void bn256_scalar_random(scalar_t out) {
     scalar_setrandom(out, bn_n);
 }
 
-void bn256_scalarmult_base_g1(curvepoint_fp_t out, scalar_t const scl) {
+void bn256_scalarmult_base_g1(g1_t out, scalar_t const scl) {
     curvepoint_fp_scalarmult_vartime(out, bn_curvegen, scl);
     curvepoint_fp_makeaffine(out);
 }
 
-void bn256_g1_random(curvepoint_fp_t g1_out, scalar_t scalar_out) {
+void bn256_g1_random(g1_t g1_out, scalar_t scalar_out) {
     scalar_setrandom(scalar_out, bn_n);
     bn256_scalarmult_base_g1(g1_out, scalar_out);
     curvepoint_fp_makeaffine(g1_out);
 }
 
-void bn256_g2_random(twistpoint_fp2_t g2_out, scalar_t scalar_out) {
+void bn256_g2_random(g2_t g2_out, scalar_t scalar_out) {
     scalar_setrandom(scalar_out, bn_n);
     bn256_scalarmult_base_g2(g2_out, scalar_out);
     twistpoint_fp2_makeaffine(g2_out);
 }
 
-void bn256_scalarmult_base_g2(twistpoint_fp2_t out, scalar_t scl) {
+void bn256_scalarmult_base_g2(g2_t out, scalar_t scl) {
     twistpoint_fp2_scalarmult_vartime(out, bn_twistgen, scl);
     twistpoint_fp2_makeaffine(out);
 }
@@ -123,6 +123,7 @@ int bn256_init() {
 
     mpz_t mpz_bn_n;
     mpz_init_set_str(mpz_bn_n, bn_nstr, 10);
+    mpz_init_set_str(mpz_bn_p, bn_pstr, 10);
 
     fpe_setone(curve_b);
     fpe_triple(curve_b, curve_b);
@@ -156,14 +157,10 @@ void bn256_clear() {
     initialised = false;
 }
 
-int bn256_hash_g1(curvepoint_fp_t out, size_t msg_len, uint8_t msg[msg_len]) {
-    uint8_t hash[crypto_generichash_BYTES];
-    crypto_generichash(hash, crypto_generichash_BYTES, msg, msg_len, NULL, 0);
-
+int bn256_hash_g1(g1_t out, size_t msg_len, uint8_t msg[msg_len]) {
     mpz_t t;
     mpz_init(t);
-    mpz_import(t, crypto_generichash_BYTES, 1, 1, 1, 0, hash);
-    mpz_mod(t, t, mpz_bn_p);
+    bn256_mpz_hash_fpe(t, msg_len, msg);
 
     mpz_t w;
     mpz_init(w);
@@ -263,9 +260,9 @@ int bn256_hash_g1(curvepoint_fp_t out, size_t msg_len, uint8_t msg[msg_len]) {
 }
 
 /*
-int xbn256_hash_g1(curvepoint_fp_t out, uint8_t *msg, size_t msg_len) {
+int xbn256_hash_g1(g1_t out, uint8_t *msg, size_t msg_len) {
     fpe_t x;
-    mpz_2_fpe_hash(x, msg_len, msg);
+    bn256_mpz_hash_fpe(x, msg_len, msg);
     fpe_t y;
 
     int is_negative = fpe_legendre(x);
@@ -290,28 +287,30 @@ int xbn256_hash_g1(curvepoint_fp_t out, uint8_t *msg, size_t msg_len) {
 }
 */
 
-static void mpz_2_fpe_hash(fpe_t out, size_t msg_len, const uint8_t msg[msg_len]) {
-    mpz_t tmp_hash;
-    mpz_init(tmp_hash);
-
+static void bn256_mpz_hash_fpe(mpz_t hash_out, size_t msg_len, const uint8_t *msg) {
     uint8_t hash[crypto_generichash_BYTES];
     crypto_generichash(hash, crypto_generichash_BYTES, msg, sizeof msg_len, NULL,
                        0);
-    mpz_import(tmp_hash, crypto_generichash_BYTES, 1, 1, 1, 0, hash);
-    mpz_mod(tmp_hash, tmp_hash, mpz_bn_p);
-    mpz2fp(out, tmp_hash);
-    mpz_clear(tmp_hash);
+    mpz_import(hash_out, crypto_generichash_BYTES, 1, 1, 1, 0, hash);
+    mpz_mod(hash_out, hash_out, mpz_bn_p);
 }
 
-int bn256_hash_g2(twistpoint_fp2_struct_t *out, size_t msg_len, const uint8_t msg[msg_len]) {
-    fpe_struct_t t_single = {{0}};
+static void bn256_mpz_hash_to_fpe(fpe_t out, size_t msg_len, const uint8_t *msg) {
+    mpz_t mpz_hash;
+    mpz_init(mpz_hash);
+    bn256_mpz_hash_fpe(mpz_hash, msg_len, msg);
+    mpz2fp(out, mpz_hash);
+    mpz_clear(mpz_hash);
+}
 
-    mpz_2_fpe_hash(&t_single, msg_len, msg);
+int bn256_hash_g2(g2_t out, size_t msg_len, const uint8_t msg[msg_len]) {
+    fpe_t t_single;
+    bn256_mpz_hash_to_fpe(t_single, msg_len, msg);
 
-    fp2e_t t = {{{0}}};
-    _2fpe_to_fp2e(t, &t_single, &t_single);
+    fp2e_t t;
+    _2fpe_to_fp2e(t, t_single, t_single);
 
-    fp2e_t w = {{{0}}};
+    fp2e_t w;
     fp2e_mul(w, t, t);
 
     fp2e_add(w, w, twist_b);
@@ -382,14 +381,14 @@ void deserialize_fpe(fpe_struct_t *out, uint8_t *in) {
     mpz_clear(tmp);
 }
 
-void bn256_deserialize_g1(curvepoint_fp_t out, uint8_t *in) {
+void bn256_deserialize_g1(g1_t out, uint8_t *in) {
     deserialize_fpe(out->m_x, in);
     deserialize_fpe(out->m_y, in + fpe_bytes);
     fpe_setone(out->m_z);
     fpe_setzero(out->m_t);
 }
 
-void bn256_deserialize_g2(twistpoint_fp2_t out, uint8_t *in) {
+void bn256_deserialize_g2(g2_t out, uint8_t *in) {
     fpe_t fp_elems[4] = {{{{0}}}};
     deserialize_fpe(fp_elems[0], in);
     deserialize_fpe(fp_elems[1], in + fpe_bytes);
@@ -412,14 +411,14 @@ void bn256_serialize_g1_xonly(uint8_t *out, curvepoint_fp_struct_t *g1_elem) {
     serialize_fpe(out, g1_elem->m_x);
 }
 
-void bn256_serialize_g2_xonly(uint8_t *out, twistpoint_fp2_t g2_elem) {
+void bn256_serialize_g2_xonly(uint8_t *out, g2_t g2_elem) {
     fpe_t tmp1, tmp2;
     fp2e_to_2fpe(tmp1, tmp2, g2_elem->m_x);
     serialize_fpe(out, tmp1);
     serialize_fpe(out + fpe_bytes, tmp2);
 }
 
-void bn256_deserialize_g1_xonly(curvepoint_fp_t out, uint8_t *in) {
+void bn256_deserialize_g1_xonly(g1_t out, uint8_t *in) {
     deserialize_fpe(out->m_x, in);
     fpe_get_weierstrass(out->m_y, out->m_x);
     fpe_sqrt(out->m_y, out->m_x);
@@ -442,10 +441,10 @@ void bn256_serialize_gt(uint8_t *out, fp12e_struct_t *gt_elem) {
     }
 }
 
-void bn256_deserialize_and_sum_g1(curvepoint_fp_struct_t *out, uint8_t *in, size_t count) {
+void bn256_deserialize_and_sum_g1(g1_t out, uint8_t *in, size_t count) {
     if (count < 1) return;
 
-    curvepoint_fp_t tmp;
+    g1_t tmp;
     bn256_deserialize_g1(tmp, in);
     curvepoint_fp_set(out, tmp);
     fpe_setone(out->m_z);
@@ -457,10 +456,10 @@ void bn256_deserialize_and_sum_g1(curvepoint_fp_struct_t *out, uint8_t *in, size
     }
 }
 
-void bn256_deserialize_and_sum_g2(twistpoint_fp2_struct_t *out, uint8_t *in, size_t count) {
+void bn256_deserialize_and_sum_g2(g2_t out, uint8_t *in, size_t count) {
     if (count < 1) return;
 
-    twistpoint_fp2_t tmp;
+    g2_t tmp;
     bn256_deserialize_g2(tmp, in);
     twistpoint_fp2_set(out, tmp);
     fp2e_setone(out->m_z);
@@ -472,18 +471,18 @@ void bn256_deserialize_and_sum_g2(twistpoint_fp2_struct_t *out, uint8_t *in, siz
     }
 }
 
-void bn256_sum_g1(curvepoint_fp_t out, curvepoint_fp_t *in, size_t count) {
+void bn256_sum_g1(g1_t out, g1_struct *in, size_t count) {
     if (count < 1) return;
 
-    curvepoint_fp_set(out, in[0]);
+    curvepoint_fp_set(out, &in[0]);
     fpe_setone(out->m_z);
 
     for (size_t i = 1; i < count; i++) {
-        curvepoint_fp_add_vartime(out, out, in[i]);
+        curvepoint_fp_add_vartime(out, out, &in[i]);
     }
 }
 
-int bn256_sum_g2(twistpoint_fp2_t out, twistpoint_fp2_struct_t *in, const size_t count) {
+int bn256_sum_g2(g2_t out, g2_struct *in, const size_t count) {
     if (count < 1) return -1;
 
     twistpoint_fp2_set(out, &in[0]);
@@ -495,7 +494,7 @@ int bn256_sum_g2(twistpoint_fp2_t out, twistpoint_fp2_struct_t *in, const size_t
     return 0;
 }
 
-void bn256_serialize_g2(uint8_t *out, twistpoint_fp2_t in) {
+void bn256_serialize_g2(uint8_t *out, g2_t in) {
     fpe_t fpe_elems[4];
     fp2e_to_2fpe(fpe_elems[0], fpe_elems[1], in->m_x);
     fp2e_to_2fpe(fpe_elems[2], fpe_elems[3], in->m_y);
@@ -507,7 +506,7 @@ void bn256_serialize_g2(uint8_t *out, twistpoint_fp2_t in) {
     }
 }
 
-void bn256_pair(fp12e_t rop, twistpoint_fp2_t op1, curvepoint_fp_t op2) {
+void bn256_pair(fp12e_t rop, g2_t op1, g1_t op2) {
     twistpoint_fp2_makeaffine(op1);
     curvepoint_fp_makeaffine(op2);
     optate(rop, op1, op2);
