@@ -1,5 +1,4 @@
 #include <string.h>
-#include "bn256.h"
 #include "bn256_ibe.h"
 
 int main() {
